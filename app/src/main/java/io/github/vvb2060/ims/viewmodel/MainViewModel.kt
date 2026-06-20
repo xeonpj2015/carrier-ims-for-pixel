@@ -71,6 +71,8 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
         private const val ISSUE_FAILURE_LOG_MAX_LINES = 200
         private const val CAPTIVE_PORTAL_CHECK_TIMEOUT_MS = 2_500
         private const val NETWORK_EXIT_CHECK_TIMEOUT_MS = 4_000
+        private const val IMS_REGISTER_RETRY_COUNT = 4
+        private const val IMS_REGISTER_RETRY_DELAY_MS = 2_000L
         private const val NETWORK_EXIT_API_URL = "https://ipapi.co/json/"
         private const val PROJECT_SOURCE_AD_SLOTS_PATH = "/api/sources/carrier-ims/ad-slots"
         private const val PROJECT_PUBLIC_AD_SLOTS_PATH = "/api/project/public-ad-slots?project_id=carrier-ims"
@@ -532,13 +534,24 @@ class MainViewModel(private val application: Application) : AndroidViewModel(app
             toast(application.getString(R.string.ims_restart_failed, resultMsg), false)
             return ImsRegisterResult(null, resultMsg)
         }
-        val status = readImsRegistrationStatus(subId)
-        if (status == true) {
-            toast(application.getString(R.string.ims_register_success))
-        } else {
-            toast(application.getString(R.string.ims_register_pending), false)
+        val status = waitForImsRegistrationStatus(subId)
+        when (status) {
+            true -> toast(application.getString(R.string.ims_register_success))
+            false -> toast(application.getString(R.string.ims_register_pending), false)
+            null -> toast(application.getString(R.string.ims_register_unknown), false)
         }
         return ImsRegisterResult(status, null)
+    }
+
+    private suspend fun waitForImsRegistrationStatus(subId: Int): Boolean? {
+        var lastStatus: Boolean? = null
+        repeat(IMS_REGISTER_RETRY_COUNT) {
+            delay(IMS_REGISTER_RETRY_DELAY_MS)
+            val status = readImsRegistrationStatus(subId)
+            lastStatus = status
+            if (status == true) return true
+        }
+        return lastStatus
     }
 
     suspend fun applyCaptivePortalCnUrls(): String? {

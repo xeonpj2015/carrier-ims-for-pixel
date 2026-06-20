@@ -21,6 +21,11 @@ import io.github.vvb2060.ims.privileged.ImsStatusReader
 import io.github.vvb2060.ims.privileged.ImsModifier
 import io.github.vvb2060.ims.privileged.SimReader
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.lsposed.hiddenapibypass.LSPass
 import rikka.shizuku.ShizukuBinderWrapper
@@ -36,6 +41,7 @@ class ShizukuProvider : ShizukuProvider() {
     companion object {
         private const val TAG = "ShizukuProvider"
         private const val INSTRUMENTATION_RESULT_TIMEOUT_MS = 15_000L
+        private val instrumentationMutex = Mutex()
 
         data class CaptivePortalConfig(
             val httpUrl: String,
@@ -92,7 +98,17 @@ class ShizukuProvider : ShizukuProvider() {
                 putStringArray(ConfigReader.BUNDLE_KEYS, keys)
             }
             val result = startInstrumentation(context, ConfigReader::class.java, args, true)
-            return result?.getBundle(ConfigReader.BUNDLE_RESULT)
+            if (result == null) return null
+            val value = result.rawValue(ConfigReader.BUNDLE_RESULT)
+            if (value == null) return null
+            if (value !is Bundle) {
+                Log.w(
+                    TAG,
+                    "readCarrierConfig: unexpected result type ${value.javaClass.name} for subId=$subId"
+                )
+                return null
+            }
+            return value
         }
 
         suspend fun dumpCarrierConfig(context: Context, subId: Int): String? {
@@ -125,8 +141,21 @@ class ShizukuProvider : ShizukuProvider() {
             }
             val result = startInstrumentation(context, ImsStatusReader::class.java, args, true)
             if (result == null) return null
-            if (result.getString(ImsStatusReader.BUNDLE_RESULT_MSG) != null) return null
-            return result.getBoolean(ImsStatusReader.BUNDLE_RESULT)
+            val msg = result.getString(ImsStatusReader.BUNDLE_RESULT_MSG)
+            if (msg != null) {
+                Log.w(TAG, "readImsRegistrationStatus: failed for subId=$subId: $msg")
+                return null
+            }
+            val value = result.rawValue(ImsStatusReader.BUNDLE_RESULT)
+            if (value !is Boolean) {
+                Log.w(
+                    TAG,
+                    "readImsRegistrationStatus: missing or invalid result for subId=$subId"
+                )
+                return null
+            }
+            Log.i(TAG, "readImsRegistrationStatus: subId=$subId registered=$value")
+            return value
         }
 
         suspend fun updateCarrierConfigBoolean(
@@ -222,7 +251,7 @@ class ShizukuProvider : ShizukuProvider() {
             cls: Class<*>,
             args: Bundle?,
             receiveResult: Boolean,
-        ): Bundle? {
+        ): Bundle? = instrumentationMutex.withLock {
             val deferredResult = CompletableDeferred<Bundle?>()
             var watcher: IInstrumentationWatcher.Stub? = null
             if (receiveResult) {
@@ -249,9 +278,11 @@ class ShizukuProvider : ShizukuProvider() {
             val name = ComponentName(context, cls)
             val flags = 8 // ActivityManager.INSTR_FLAG_NO_RESTART
             val connection = UiAutomationConnection()
+            var started = false
             try {
                 Log.d(TAG, "startInstrumentation: call with component: $name")
                 am.startInstrumentation(name, null, flags, args, watcher, connection, 0, null)
+                started = true
                 Log.i(TAG, "instrumentation started successfully")
                 if (receiveResult) {
                     return withTimeoutOrNull(INSTRUMENTATION_RESULT_TIMEOUT_MS) {
@@ -259,6 +290,15 @@ class ShizukuProvider : ShizukuProvider() {
                     }
                 }
                 return null
+            } catch (e: CancellationException) {
+                if (started && receiveResult) {
+                    withContext(NonCancellable) {
+                        withTimeoutOrNull(INSTRUMENTATION_RESULT_TIMEOUT_MS) {
+                            deferredResult.await()
+                        }
+                    }
+                }
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "failed to start instrumentation", e)
                 return null
@@ -294,5 +334,8 @@ class ShizukuProvider : ShizukuProvider() {
                 lower.contains("security exception") ||
                 lower.contains("empty result")
         }
+
+        @Suppress("DEPRECATION")
+        private fun Bundle.rawValue(key: String): Any? = get(key)
     }
 }

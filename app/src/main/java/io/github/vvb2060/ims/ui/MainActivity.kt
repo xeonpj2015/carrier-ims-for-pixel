@@ -2,19 +2,23 @@ package io.github.vvb2060.ims.ui
 
 import android.annotation.SuppressLint
 import android.app.DownloadManager
+import android.app.StatusBarManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.drawable.Icon as AndroidIcon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.telephony.SubscriptionManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -130,6 +134,10 @@ import io.github.vvb2060.ims.model.SimSelection
 import io.github.vvb2060.ims.model.SupportRules
 import io.github.vvb2060.ims.model.SystemInfo
 import io.github.vvb2060.ims.privileged.ImsModifier
+import io.github.vvb2060.ims.tiles.SIM1IMSStatusTileService
+import io.github.vvb2060.ims.tiles.SIM1VoLTETileService
+import io.github.vvb2060.ims.tiles.SIM2IMSStatusTileService
+import io.github.vvb2060.ims.tiles.SIM2VoLTETileService
 import io.github.vvb2060.ims.viewmodel.MainViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -240,6 +248,27 @@ private fun isChinaDomesticSim(sim: SimSelection?): Boolean {
     return mcc == "460"
 }
 
+private fun displayCountryIso(sim: SimSelection): String {
+    val rawIso = sim.countryIso.trim()
+    if (rawIso.length == 2 && rawIso.all { it.isLetter() }) {
+        return rawIso.lowercase(Locale.US)
+    }
+    val mcc = sim.mcc.filter { it.isDigit() }.take(3)
+    val mccInt = mcc.toIntOrNull()
+    val derivedIso = when {
+        mcc == "460" -> "cn"
+        mcc == "454" -> "hk"
+        mcc == "466" -> "tw"
+        mccInt != null && mccInt in 310..316 -> "us"
+        mccInt != null && mccInt in 440..441 -> "jp"
+        mccInt != null && mccInt in 234..235 -> "gb"
+        mcc == "450" -> "kr"
+        mcc == "525" -> "sg"
+        else -> null
+    }
+    return derivedIso ?: rawIso.ifBlank { "-" }
+}
+
 private fun toDisplayVersion(rawVersion: String?): String {
     val text = rawVersion?.trim().orEmpty()
     if (text.isBlank()) return ""
@@ -259,6 +288,59 @@ private fun buildCompleteFeatureMap(source: Map<Feature, FeatureValue>): LinkedH
         completed[feature] = source[feature] ?: defaultFeatureValue(feature)
     }
     return completed
+}
+
+private fun openApnSettings(context: Context, selectedSim: SimSelection?) {
+    val subId = selectedSim?.subId ?: -1
+    if (subId < 0) {
+        Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
+        return
+    }
+    val intent = Intent(Settings.ACTION_APN_SETTINGS)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        .putExtra(Settings.EXTRA_SUB_ID, subId)
+        .putExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, subId)
+        .putExtra("sub_id", subId)
+        .putExtra("subscription", subId)
+    if (intent.resolveActivity(context.packageManager) == null) {
+        Toast.makeText(context, R.string.apn_settings_open_failed, Toast.LENGTH_LONG).show()
+        return
+    }
+    runCatching {
+        context.startActivity(intent)
+    }.onFailure {
+        Toast.makeText(context, R.string.apn_settings_open_failed, Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun requestAddQuickSettingsTile(
+    context: Context,
+    tileClass: Class<*>,
+    label: String,
+) {
+    val statusBarManager = context.getSystemService(StatusBarManager::class.java)
+    if (statusBarManager == null) {
+        Toast.makeText(context, R.string.qs_tile_add_failed, Toast.LENGTH_LONG).show()
+        return
+    }
+    runCatching {
+        statusBarManager.requestAddTileService(
+            ComponentName(context, tileClass),
+            label,
+            AndroidIcon.createWithResource(context, R.mipmap.ic_launcher),
+            context.mainExecutor,
+        ) { resultCode ->
+            val messageRes = when (resultCode) {
+                StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED -> R.string.qs_tile_added
+                StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED -> R.string.qs_tile_already_added
+                StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_NOT_ADDED -> R.string.qs_tile_not_added
+                else -> R.string.qs_tile_add_failed
+            }
+            Toast.makeText(context, messageRes, Toast.LENGTH_SHORT).show()
+        }
+    }.onFailure {
+        Toast.makeText(context, R.string.qs_tile_add_failed, Toast.LENGTH_LONG).show()
+    }
 }
 
 private fun syncFeatureState(
@@ -418,10 +500,12 @@ class MainActivity : BaseActivity() {
         var homeAdToShow by remember { mutableStateOf<CommercialAd?>(null) }
         var supportPaymentUrl by remember { mutableStateOf<String?>(null) }
         var apnDraft by remember { mutableStateOf<ApnDraftConfig?>(null) }
+        var apnDraftSim by remember { mutableStateOf<SimSelection?>(null) }
         var applyingApn by remember { mutableStateOf(false) }
         var submittingBusinessIntent by remember { mutableStateOf(false) }
         var configBackups by remember { mutableStateOf<List<ConfigBackupSnapshot>>(emptyList()) }
         var pendingBackupRestore by remember { mutableStateOf<ConfigBackupSnapshot?>(null) }
+        var pendingBackupRestoreSim by remember { mutableStateOf<SimSelection?>(null) }
         val diagnosticsLines = remember { mutableStateListOf<String>() }
         val featureSwitches = remember { mutableStateMapOf<Feature, FeatureValue>() }
         val committedFeatureSwitches = remember { mutableStateMapOf<Feature, FeatureValue>() }
@@ -557,14 +641,15 @@ class MainActivity : BaseActivity() {
             }
         }
 
-        val handleFeatureSwitchChange: (Feature, FeatureValue) -> Unit = handleFeatureSwitchChange@{ feature, value ->
+        val handleFeatureSwitchChange: (SimSelection?, Feature, FeatureValue) -> Unit =
+            handleFeatureSwitchChange@{ targetSim, feature, value ->
             when (feature.valueType) {
                 FeatureValueType.STRING -> {
                     featureSwitches[feature] = value
                 }
 
                 FeatureValueType.BOOLEAN -> {
-                    val sim = selectedSim
+                    val sim = targetSim
                     val previousUiValue = featureSwitches[feature] ?: defaultFeatureValue(feature)
                     val previousCommittedValue =
                         committedFeatureSwitches[feature] ?: defaultFeatureValue(feature)
@@ -620,8 +705,70 @@ class MainActivity : BaseActivity() {
             }
         }
 
-        val restoreBackupAction = restoreBackup@{ backup: ConfigBackupSnapshot, allowMismatch: Boolean ->
-            val sim = selectedSim
+        val refreshSimListAction: () -> Unit = {
+            scope.launch {
+                val hasValidSim = viewModel.refreshSimListNow()
+                val messageRes = if (hasValidSim) {
+                    R.string.sim_list_refresh
+                } else {
+                    R.string.sim_list_refresh_failed_restart_shizuku
+                }
+                val duration = if (hasValidSim) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                Toast.makeText(context, messageRes, duration).show()
+            }
+        }
+
+        val fixCaptivePortalAction = fixCaptivePortal@{
+            if (fixingCaptivePortal) return@fixCaptivePortal
+            if (shizukuStatus != ShizukuStatus.READY) {
+                Toast.makeText(context, R.string.shizuku_not_running_msg, Toast.LENGTH_LONG).show()
+                return@fixCaptivePortal
+            }
+            scope.launch {
+                val action = when (captivePortalFixState?.mode) {
+                    MainViewModel.CaptivePortalFixMode.CAN_RESTORE -> CaptivePortalAction.RESTORE
+                    MainViewModel.CaptivePortalFixMode.NORMAL -> CaptivePortalAction.NONE
+                    else -> CaptivePortalAction.FIX
+                }
+                if (action == CaptivePortalAction.NONE) return@launch
+                fixingCaptivePortal = true
+                val resultMsg = when (action) {
+                    CaptivePortalAction.FIX -> viewModel.applyCaptivePortalCnUrls()
+                    CaptivePortalAction.RESTORE -> viewModel.restoreCaptivePortalDefaultUrls()
+                    CaptivePortalAction.NONE -> null
+                }
+                fixingCaptivePortal = false
+                if (resultMsg == null) {
+                    Toast.makeText(
+                        context,
+                        if (action == CaptivePortalAction.RESTORE) {
+                            R.string.captive_portal_restore_success
+                        } else {
+                            R.string.captive_portal_fix_success
+                        },
+                        Toast.LENGTH_LONG
+                    ).show()
+                } else {
+                    Toast.makeText(
+                        context,
+                        context.getString(
+                            if (action == CaptivePortalAction.RESTORE) {
+                                R.string.captive_portal_restore_failed
+                            } else {
+                                R.string.captive_portal_fix_failed
+                            },
+                            resultMsg
+                        ),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                checkingCaptivePortalStatus = true
+                captivePortalFixState = viewModel.queryCaptivePortalFixState()
+                checkingCaptivePortalStatus = false
+            }
+        }
+
+        val restoreBackupAction = restoreBackup@{ sim: SimSelection?, backup: ConfigBackupSnapshot, allowMismatch: Boolean ->
             if (sim == null || sim.subId < 0) {
                 Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
                 return@restoreBackup
@@ -634,6 +781,7 @@ class MainActivity : BaseActivity() {
                 SupportRules.requiresBackupMismatchConfirmation(backup, sim.mcc, sim.mnc)
             ) {
                 pendingBackupRestore = backup
+                pendingBackupRestoreSim = sim
                 return@restoreBackup
             }
             scope.launch {
@@ -800,76 +948,10 @@ class MainActivity : BaseActivity() {
                         showDonateButton = false,
                     )
                 }
-                if (selectedTab == MainTab.EXTRA) CaptivePortalFixCard(
-                    shizukuStatus = shizukuStatus,
-                    checkingCaptivePortalStatus = checkingCaptivePortalStatus,
-                    fixingCaptivePortal = fixingCaptivePortal,
-                    state = captivePortalFixState,
-                    onFixCaptivePortal = {
-                        if (fixingCaptivePortal) return@CaptivePortalFixCard
-                        if (shizukuStatus != ShizukuStatus.READY) {
-                            Toast.makeText(context, R.string.shizuku_not_running_msg, Toast.LENGTH_LONG).show()
-                            return@CaptivePortalFixCard
-                        }
-                        scope.launch {
-                            val action = when (captivePortalFixState?.mode) {
-                                MainViewModel.CaptivePortalFixMode.CAN_RESTORE -> CaptivePortalAction.RESTORE
-                                MainViewModel.CaptivePortalFixMode.NORMAL -> CaptivePortalAction.NONE
-                                else -> CaptivePortalAction.FIX
-                            }
-                            if (action == CaptivePortalAction.NONE) return@launch
-                            fixingCaptivePortal = true
-                            val resultMsg = when (action) {
-                                CaptivePortalAction.FIX -> viewModel.applyCaptivePortalCnUrls()
-                                CaptivePortalAction.RESTORE -> viewModel.restoreCaptivePortalDefaultUrls()
-                                CaptivePortalAction.NONE -> null
-                            }
-                            fixingCaptivePortal = false
-                            if (resultMsg == null) {
-                                Toast.makeText(
-                                    context,
-                                    if (action == CaptivePortalAction.RESTORE) {
-                                        R.string.captive_portal_restore_success
-                                    } else {
-                                        R.string.captive_portal_fix_success
-                                    },
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            } else {
-                                Toast.makeText(
-                                    context,
-                                    context.getString(
-                                        if (action == CaptivePortalAction.RESTORE) {
-                                            R.string.captive_portal_restore_failed
-                                        } else {
-                                            R.string.captive_portal_fix_failed
-                                        },
-                                        resultMsg
-                                    ),
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                            checkingCaptivePortalStatus = true
-                            captivePortalFixState = viewModel.queryCaptivePortalFixState()
-                            checkingCaptivePortalStatus = false
-                        }
-                    }
-                )
                 if (selectedTab == MainTab.IMS && shizukuStatus == ShizukuStatus.READY) {
                     SimCardSelectionCard(selectedSim, allSimList, onSelectSim = {
                         selectedSim = it
-                    }, onRefreshSimList = {
-                        scope.launch {
-                            val hasValidSim = viewModel.refreshSimListNow()
-                            val messageRes = if (hasValidSim) {
-                                R.string.sim_list_refresh
-                            } else {
-                                R.string.sim_list_refresh_failed_restart_shizuku
-                            }
-                            val duration = if (hasValidSim) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
-                            Toast.makeText(context, messageRes, duration).show()
-                        }
-                    })
+                    }, onRefreshSimList = refreshSimListAction)
                     FeaturesCard(
                         isSelectAllSim = selectedSim?.subId == -1,
                         allSimList = allSimList,
@@ -964,7 +1046,9 @@ class MainActivity : BaseActivity() {
                                 ?.takeIf { it >= 0 }
                                 ?.let { countryMccDraftBySubId[it] = newMcc }
                         },
-                        onFeatureSwitchChange = handleFeatureSwitchChange,
+                        onFeatureSwitchChange = { feature, value ->
+                            handleFeatureSwitchChange(selectedSim, feature, value)
+                        },
                         showTikTokFix = false,
                         onTextFeatureCommit = { _ ->
                             scope.launch {
@@ -1130,17 +1214,27 @@ class MainActivity : BaseActivity() {
                     )
                 }
                 if (selectedTab == MainTab.EXTRA) {
+                    val extraSimList = allSimList.filter { it.subId >= 0 }
+                    val extraSelectedSim = selectedSim?.takeIf { it.subId >= 0 } ?: extraSimList.firstOrNull()
                     ExtraToolsPage(
                         shizukuStatus = shizukuStatus,
-                        selectedSim = selectedSim,
+                        selectedSim = extraSelectedSim,
+                        allSimList = extraSimList,
                         tiktokEnabled = (featureSwitches[Feature.TIKTOK_NETWORK_FIX]?.data as? Boolean) == true,
                         featureSwitchesEnabled = !applyingConfiguration,
+                        checkingCaptivePortalStatus = checkingCaptivePortalStatus,
+                        fixingCaptivePortal = fixingCaptivePortal,
+                        captivePortalFixState = captivePortalFixState,
                         networkExitChecking = networkExitChecking,
                         networkExitStatus = networkExitStatus,
                         networkExitError = networkExitError,
                         configBackups = configBackups,
+                        onSelectSim = { selectedSim = it },
+                        onRefreshSimList = refreshSimListAction,
+                        onFixCaptivePortal = fixCaptivePortalAction,
                         onTikTokFixChange = { enabled ->
                             handleFeatureSwitchChange(
+                                extraSelectedSim,
                                 Feature.TIKTOK_NETWORK_FIX,
                                 FeatureValue(enabled, FeatureValueType.BOOLEAN)
                             )
@@ -1157,18 +1251,14 @@ class MainActivity : BaseActivity() {
                             }
                         },
                         onOpenApnSettings = {
-                            runCatching {
-                                startActivity(Intent(Settings.ACTION_APN_SETTINGS))
-                            }.onFailure {
-                                Toast.makeText(context, R.string.apn_settings_open_failed, Toast.LENGTH_LONG).show()
-                            }
+                            openApnSettings(context, extraSelectedSim)
                         },
                         onPrepareApn = {
-                            val sim = selectedSim
-                                if (sim == null || sim.subId < 0) {
-                                    Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
-                                    return@ExtraToolsPage
-                                }
+                            val sim = extraSelectedSim
+                            if (sim == null || sim.subId < 0) {
+                                Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
+                                return@ExtraToolsPage
+                            }
                             val draft = viewModel.buildSuggestedApnConfig(sim)
                             val validation = SupportRules.validateApnDraft(draft)
                             if (validation != null) {
@@ -1179,10 +1269,18 @@ class MainActivity : BaseActivity() {
                                 ).show()
                                 return@ExtraToolsPage
                             }
+                            apnDraftSim = sim
                             apnDraft = draft
                         },
+                        onAddQuickTile = { tileClass, labelRes ->
+                            requestAddQuickSettingsTile(
+                                context = context,
+                                tileClass = tileClass,
+                                label = context.getString(labelRes),
+                            )
+                        },
                         onBackupConfig = {
-                            val sim = selectedSim
+                            val sim = extraSelectedSim
                             if (sim == null || sim.subId < 0) {
                                 Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
                                 return@ExtraToolsPage
@@ -1196,7 +1294,7 @@ class MainActivity : BaseActivity() {
                             configBackups = viewModel.loadConfigBackups()
                             Toast.makeText(context, R.string.config_backup_saved, Toast.LENGTH_SHORT).show()
                         },
-                        onRestoreBackup = { backup -> restoreBackupAction(backup, false) },
+                        onRestoreBackup = { backup -> restoreBackupAction(extraSelectedSim, backup, false) },
                         onDeleteBackup = { backup ->
                             viewModel.deleteConfigBackup(backup.id)
                             configBackups = viewModel.loadConfigBackups()
@@ -1288,13 +1386,17 @@ class MainActivity : BaseActivity() {
                         draft = draft,
                         applying = applyingApn,
                         onDismiss = {
-                            if (!applyingApn) apnDraft = null
+                            if (!applyingApn) {
+                                apnDraft = null
+                                apnDraftSim = null
+                            }
                         },
                         onConfirm = {
-                            val sim = selectedSim
+                            val sim = apnDraftSim
                             if (sim == null || sim.subId < 0) {
                                 Toast.makeText(context, R.string.select_single_sim, Toast.LENGTH_SHORT).show()
                                 apnDraft = null
+                                apnDraftSim = null
                                 return@ApnConfirmDialog
                             }
                             if (shizukuStatus != ShizukuStatus.READY) {
@@ -1306,6 +1408,7 @@ class MainActivity : BaseActivity() {
                                 val resultMsg = viewModel.applyApnConfig(sim, draft)
                                 applyingApn = false
                                 apnDraft = null
+                                apnDraftSim = null
                                 Toast.makeText(
                                     context,
                                     if (resultMsg == null) {
@@ -1320,15 +1423,19 @@ class MainActivity : BaseActivity() {
                     )
                 }
                 pendingBackupRestore?.let { backup ->
+                    val restoreSim = pendingBackupRestoreSim
                     AlertDialog(
-                        onDismissRequest = { pendingBackupRestore = null },
+                        onDismissRequest = {
+                            pendingBackupRestore = null
+                            pendingBackupRestoreSim = null
+                        },
                         title = { Text(stringResource(R.string.config_backup_mismatch_title)) },
                         text = {
                             Text(
                                 stringResource(
                                     R.string.config_backup_mismatch_message,
                                     "${backup.mcc.ifBlank { "-" }}/${backup.mnc.ifBlank { "-" }}",
-                                    "${selectedSim?.mcc.orEmpty().ifBlank { "-" }}/${selectedSim?.mnc.orEmpty().ifBlank { "-" }}"
+                                    "${restoreSim?.mcc.orEmpty().ifBlank { "-" }}/${restoreSim?.mnc.orEmpty().ifBlank { "-" }}"
                                 )
                             )
                         },
@@ -1336,14 +1443,18 @@ class MainActivity : BaseActivity() {
                             TextButton(
                                 onClick = {
                                     pendingBackupRestore = null
-                                    restoreBackupAction(backup, true)
+                                    pendingBackupRestoreSim = null
+                                    restoreBackupAction(restoreSim, backup, true)
                                 }
                             ) {
                                 Text(stringResource(R.string.config_backup_restore_anyway))
                             }
                         },
                         dismissButton = {
-                            TextButton(onClick = { pendingBackupRestore = null }) {
+                            TextButton(onClick = {
+                                pendingBackupRestore = null
+                                pendingBackupRestoreSim = null
+                            }) {
                                 Text(stringResource(id = android.R.string.cancel))
                             }
                         }
@@ -1693,16 +1804,24 @@ private fun HomeStatusCard(
 private fun ExtraToolsPage(
     shizukuStatus: ShizukuStatus,
     selectedSim: SimSelection?,
+    allSimList: List<SimSelection>,
     tiktokEnabled: Boolean,
     featureSwitchesEnabled: Boolean,
+    checkingCaptivePortalStatus: Boolean,
+    fixingCaptivePortal: Boolean,
+    captivePortalFixState: MainViewModel.CaptivePortalFixState?,
     networkExitChecking: Boolean,
     networkExitStatus: NetworkExitStatus?,
     networkExitError: String?,
     configBackups: List<ConfigBackupSnapshot>,
+    onSelectSim: (SimSelection) -> Unit,
+    onRefreshSimList: () -> Unit,
+    onFixCaptivePortal: () -> Unit,
     onTikTokFixChange: (Boolean) -> Unit,
     onCheckNetworkExit: () -> Unit,
     onOpenApnSettings: () -> Unit,
     onPrepareApn: () -> Unit,
+    onAddQuickTile: (Class<*>, Int) -> Unit,
     onBackupConfig: () -> Unit,
     onRestoreBackup: (ConfigBackupSnapshot) -> Unit,
     onDeleteBackup: (ConfigBackupSnapshot) -> Unit,
@@ -1714,15 +1833,28 @@ private fun ExtraToolsPage(
             body = stringResource(R.string.captive_portal_fix_requires_shizuku)
         )
     }
+    SimCardSelectionCard(
+        selectedSim = selectedSim,
+        allSimList = allSimList,
+        onSelectSim = onSelectSim,
+        onRefreshSimList = onRefreshSimList,
+    )
+    Spacer(modifier = Modifier.height(16.dp))
     RegionCompatibilityCard(
         selectedSim = selectedSim,
         isDomestic = isDomestic,
     )
-    TiktokFixCard(
-        enabled = tiktokEnabled,
-        available = isDomestic,
-        switchEnabled = featureSwitchesEnabled && (selectedSim?.subId ?: -1) >= 0,
-        onCheckedChange = onTikTokFixChange,
+    ApnSimInfoCard(
+        selectedSim = selectedSim,
+        onOpenApnSettings = onOpenApnSettings,
+        onPrepareApn = onPrepareApn,
+    )
+    CaptivePortalFixCard(
+        shizukuStatus = shizukuStatus,
+        checkingCaptivePortalStatus = checkingCaptivePortalStatus,
+        fixingCaptivePortal = fixingCaptivePortal,
+        state = captivePortalFixState,
+        onFixCaptivePortal = onFixCaptivePortal,
     )
     NetworkExitCard(
         checking = networkExitChecking,
@@ -1730,13 +1862,15 @@ private fun ExtraToolsPage(
         error = networkExitError,
         onCheck = onCheckNetworkExit,
     )
-    ApnSimInfoCard(
-        selectedSim = selectedSim,
-        onOpenApnSettings = onOpenApnSettings,
-        onPrepareApn = onPrepareApn,
+    TiktokFixCard(
+        enabled = tiktokEnabled,
+        available = isDomestic,
+        switchEnabled = featureSwitchesEnabled && (selectedSim?.subId ?: -1) >= 0,
+        onCheckedChange = onTikTokFixChange,
     )
-    QuickSettingsGuideCard()
+    QuickSettingsGuideCard(onAddQuickTile = onAddQuickTile)
     ConfigBackupCard(
+        selectedSim = selectedSim,
         backups = configBackups,
         onBackupConfig = onBackupConfig,
         onRestoreBackup = onRestoreBackup,
@@ -1774,7 +1908,7 @@ private fun RegionCompatibilityCard(
                 return@Column
             }
             KeyValueRow("MCC/MNC", "${sim.mcc.ifBlank { "-" }}/${sim.mnc.ifBlank { "-" }}")
-            KeyValueRow("ISO", sim.countryIso.ifBlank { "-" })
+            KeyValueRow("ISO", displayCountryIso(sim))
             KeyValueRow(
                 stringResource(R.string.region_mainland_sim),
                 stringResource(if (isDomestic) R.string.region_status_yes else R.string.region_status_no),
@@ -1904,7 +2038,7 @@ private fun ApnSimInfoCard(
             } else {
                 KeyValueRow(stringResource(R.string.sim_card), sim.showTitle)
                 KeyValueRow("MCC/MNC", "${sim.mcc.ifBlank { "-" }}/${sim.mnc.ifBlank { "-" }}")
-                KeyValueRow("ISO", sim.countryIso.ifBlank { "-" })
+                KeyValueRow("ISO", displayCountryIso(sim))
                 KeyValueRow("ICCID", sim.iccId.takeLast(4).ifBlank { "----" })
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1924,15 +2058,95 @@ private fun ApnSimInfoCard(
 }
 
 @Composable
-private fun QuickSettingsGuideCard() {
-    SimpleMessageCard(
-        title = stringResource(R.string.qs_guide_title),
-        body = stringResource(R.string.qs_guide_desc)
-    )
+private fun QuickSettingsGuideCard(
+    onAddQuickTile: (Class<*>, Int) -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 16.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = stringResource(R.string.qs_guide_title),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                text = stringResource(R.string.qs_guide_desc),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.outline,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                QuickTileButton(
+                    label = stringResource(R.string.qs_add_volte_sim_1),
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onAddQuickTile(
+                            SIM1VoLTETileService::class.java,
+                            R.string.qs_toggle_tile_title_sim_1
+                        )
+                    },
+                )
+                QuickTileButton(
+                    label = stringResource(R.string.qs_add_ims_sim_1),
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onAddQuickTile(
+                            SIM1IMSStatusTileService::class.java,
+                            R.string.qs_status_tile_title_sim_1
+                        )
+                    },
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                QuickTileButton(
+                    label = stringResource(R.string.qs_add_volte_sim_2),
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onAddQuickTile(
+                            SIM2VoLTETileService::class.java,
+                            R.string.qs_toggle_tile_title_sim_2
+                        )
+                    },
+                )
+                QuickTileButton(
+                    label = stringResource(R.string.qs_add_ims_sim_2),
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        onAddQuickTile(
+                            SIM2IMSStatusTileService::class.java,
+                            R.string.qs_status_tile_title_sim_2
+                        )
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickTileButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Button(
+        onClick = onClick,
+        modifier = modifier.height(40.dp),
+        contentPadding = ButtonDefaults.ContentPadding,
+    ) {
+        Text(label, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 @Composable
 private fun ConfigBackupCard(
+    selectedSim: SimSelection?,
     backups: List<ConfigBackupSnapshot>,
     onBackupConfig: () -> Unit,
     onRestoreBackup: (ConfigBackupSnapshot) -> Unit,
@@ -1959,6 +2173,15 @@ private fun ConfigBackupCard(
                     Text(stringResource(R.string.config_backup_action))
                 }
             }
+            Text(
+                text = if (selectedSim != null && selectedSim.subId >= 0) {
+                    stringResource(R.string.config_backup_desc, selectedSim.showTitle)
+                } else {
+                    stringResource(R.string.select_single_sim)
+                },
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.outline,
+            )
             if (backups.isEmpty()) {
                 Text(
                     text = stringResource(R.string.config_backup_empty),
@@ -2548,7 +2771,7 @@ private fun serviceSummary(status: NetworkExitStatus): String {
 
 private fun backupSubtitle(backup: ConfigBackupSnapshot): String {
     val time = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(backup.createdAtMillis))
-    return "$time · MCC/MNC ${backup.mcc.ifBlank { "-" }}/${backup.mnc.ifBlank { "-" }}"
+    return "$time · ${backup.simTitle.ifBlank { backup.name }} · MCC/MNC ${backup.mcc.ifBlank { "-" }}/${backup.mnc.ifBlank { "-" }}"
 }
 
 /**
@@ -3050,13 +3273,29 @@ fun FeaturesCard(
             )
             if (!isSelectAllSim) {
                 val selectedSubId = selectedSim?.subId
-                val checked = selectedSubId != null && imsRegistrationStatusBySubId[selectedSubId] == true
+                val status = selectedSubId?.let { imsRegistrationStatusBySubId[it] }
+                val checked = status == true
                 val loading = selectedSubId != null && imsRegistrationLoadingBySubId[selectedSubId] == true
+                val description = when {
+                    loading -> stringResource(R.string.ims_registration_status_registering_desc)
+                    status == true -> stringResource(R.string.ims_registration_status_registered_desc)
+                    status == null -> stringResource(R.string.ims_registration_status_unknown_desc)
+                    else -> stringResource(R.string.ims_registration_status_desc)
+                }
                 BooleanFeatureItem(
                     title = stringResource(R.string.ims_registration_status),
-                    description = stringResource(R.string.ims_registration_status_desc),
+                    description = description,
                     checked = checked,
                     enabled = !loading && featureSwitchesEnabled,
+                    trailingContent = if (loading) {
+                        {
+                            FeatureStatusPill(
+                                label = stringResource(R.string.ims_registration_status_registering)
+                            )
+                        }
+                    } else {
+                        null
+                    },
                     onCheckedChange = { targetChecked ->
                         if (selectedSubId == null || selectedSubId < 0) return@BooleanFeatureItem
                         onImsRegistrationToggle(selectedSubId, targetChecked)
@@ -3068,13 +3307,29 @@ fun FeaturesCard(
             } else {
                 val realSims = allSimList.filter { it.subId >= 0 }
                 realSims.forEachIndexed { index, sim ->
-                    val checked = imsRegistrationStatusBySubId[sim.subId] == true
+                    val status = imsRegistrationStatusBySubId[sim.subId]
+                    val checked = status == true
                     val loading = imsRegistrationLoadingBySubId[sim.subId] == true
+                    val description = when {
+                        loading -> stringResource(R.string.ims_registration_status_registering_desc)
+                        status == true -> stringResource(R.string.ims_registration_status_registered_desc)
+                        status == null -> stringResource(R.string.ims_registration_status_unknown_desc)
+                        else -> stringResource(R.string.ims_registration_status_desc)
+                    }
                     BooleanFeatureItem(
                         title = "${stringResource(R.string.ims_registration_status)} · ${sim.showTitle}",
-                        description = stringResource(R.string.ims_registration_status_desc),
+                        description = description,
                         checked = checked,
                         enabled = !loading && featureSwitchesEnabled,
+                        trailingContent = if (loading) {
+                            {
+                                FeatureStatusPill(
+                                    label = stringResource(R.string.ims_registration_status_registering)
+                                )
+                            }
+                        } else {
+                            null
+                        },
                         onCheckedChange = { targetChecked ->
                             onImsRegistrationToggle(sim.subId, targetChecked)
                         },
@@ -3657,6 +3912,7 @@ fun BooleanFeatureItem(
     description: String,
     checked: Boolean,
     enabled: Boolean = true,
+    trailingContent: (@Composable () -> Unit)? = null,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
@@ -3674,10 +3930,31 @@ fun BooleanFeatureItem(
             Spacer(modifier = Modifier.height(4.dp))
             Text(description, fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
         }
-        Switch(
-            checked = checked,
-            enabled = enabled,
-            onCheckedChange = onCheckedChange
+        if (trailingContent != null) {
+            trailingContent()
+        } else {
+            Switch(
+                checked = checked,
+                enabled = enabled,
+                onCheckedChange = onCheckedChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun FeatureStatusPill(label: String) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+    ) {
+        Text(
+            text = label,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
         )
     }
 }

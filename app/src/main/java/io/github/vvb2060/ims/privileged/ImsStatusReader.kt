@@ -54,6 +54,7 @@ class ImsStatusReader : Instrumentation() {
                     )
                 )
                 val isRegistered = telephony.isImsRegistered(subId)
+                Log.i(TAG, "IMS registration status: subId=$subId registered=$isRegistered")
                 result.putBoolean(BUNDLE_RESULT, isRegistered)
             }
         } catch (t: Throwable) {
