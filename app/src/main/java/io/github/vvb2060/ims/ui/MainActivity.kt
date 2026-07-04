@@ -172,6 +172,7 @@ private val RELEASES_LATEST_API_URLS = listOf(
 )
 private const val UPDATE_APK_MIME_TYPE = "application/vnd.android.package-archive"
 private const val UNKNOWN_INSTALLER_SOURCE_SETTINGS_SCHEME = "package:"
+private const val SUPPORT_RECORD_DISPLAY_LIMIT = 20
 private val VERSION_DISPLAY_WITH_REV_REGEX = Regex("""\d+\.\d+\.\d+\.[rd]\d+""")
 private val VERSION_DISPLAY_REGEX = Regex("""\d+\.\d+\.\d+""")
 
@@ -2423,9 +2424,18 @@ private fun SupportPage(
                     )
                 }
                 else -> {
-                    supportRecords.forEachIndexed { index, record ->
-                        if (index > 0) HorizontalDivider()
-                        SupportRecordRow(record)
+                    val visibleRecords = supportRecords.take(SUPPORT_RECORD_DISPLAY_LIMIT)
+                    if (supportRecords.size > visibleRecords.size) {
+                        Text(
+                            text = stringResource(R.string.support_records_recent_limit, visibleRecords.size),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        visibleRecords.forEach { record ->
+                            SupportRecordRow(record)
+                        }
                     }
                 }
             }
@@ -2437,7 +2447,16 @@ private fun SupportPage(
 private fun SupportRecordRow(record: SupportRecord) {
     val name = record.payerName.ifBlank { stringResource(R.string.support_records_anonymous) }
     val message = record.payerMessage.ifBlank { stringResource(R.string.support_records_no_message) }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    val reply = record.authorReply.trim()
+    val replyMeta = formatSupportPaidAt(record.authorRepliedAt)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -2451,19 +2470,53 @@ private fun SupportRecordRow(record: SupportRecord) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = "¥${record.amount}",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                Text(
+                    text = "¥${record.amount}",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
         Text(
             text = message,
             fontSize = 13.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
+            maxLines = 3,
             overflow = TextOverflow.Ellipsis,
         )
+        if (reply.isNotBlank()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = listOf(stringResource(R.string.support_records_author_reply), replyMeta)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" · "),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = reply,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         Text(
             text = listOf(formatSupportPaidAt(record.paidAt), record.channel)
                 .filter { it.isNotBlank() }
@@ -2867,9 +2920,10 @@ private fun SupportPaymentDialog(
     onDismiss: (String?) -> Unit,
 ) {
     val dialogHeight = (LocalConfiguration.current.screenHeightDp.dp * 0.88f).coerceAtMost(720.dp)
+    val context = LocalContext.current
     var currentOrderId by remember(url) { mutableStateOf<String?>(null) }
     var dismissed by remember(url) { mutableStateOf(false) }
-    fun dismissFromDodopay(paymentProof: String?) {
+    fun dismissFromDodopay(paymentProof: String) {
         if (dismissed) return
         dismissed = true
         onDismiss(paymentProof)
@@ -2940,7 +2994,17 @@ private fun SupportPaymentDialog(
                                         currentOrderId = orderId
                                     }
                                     if (SupportRules.isDodopayCheckoutCloseUrl(nextUrl)) {
-                                        dismissFromDodopay(SupportRules.extractDodopayPaymentProof(nextUrl))
+                                        if (SupportRules.isDodopayCheckoutCloseReady(nextUrl)) {
+                                            SupportRules.extractDodopayPaymentProof(nextUrl)?.let { paymentProof ->
+                                                dismissFromDodopay(paymentProof)
+                                            }
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                R.string.support_payment_waiting_confirmation,
+                                                Toast.LENGTH_SHORT,
+                                            ).show()
+                                        }
                                         return true
                                     }
                                     return false

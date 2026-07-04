@@ -66,6 +66,8 @@ data class SupportRecord(
     val channel: String,
     val payerName: String,
     val payerMessage: String,
+    val authorReply: String = "",
+    val authorRepliedAt: String = "",
 )
 
 data class PaymentProofVerification(
@@ -181,6 +183,10 @@ object SupportRules {
         return proof.takeIf { paymentProofPattern.matches(it) }
     }
 
+    fun isDodopayCheckoutCloseReady(value: String): Boolean {
+        return extractDodopayPaymentProof(value) != null
+    }
+
     fun extractDodopayPayOrderId(value: String): String? {
         val uri = runCatching { URI(value.trim()) }.getOrNull() ?: return null
         val scheme = uri.scheme?.lowercase(Locale.US).orEmpty()
@@ -275,22 +281,30 @@ object SupportRules {
         return buildList {
             for (index in 0 until items.length()) {
                 val item = items.optJSONObject(index) ?: continue
-                val id = item.optString("record_id").ifBlank { "record_$index" }
-                val amount = item.optString("amount")
-                val paidAt = item.optString("paid_at")
+                val id = item.cleanOptString("record_id").ifBlank { "record_$index" }
+                val amount = item.cleanOptString("amount")
+                val paidAt = item.cleanOptString("paid_at")
                 if (amount.isBlank() || paidAt.isBlank()) continue
                 add(
                     SupportRecord(
                         id = id,
                         amount = amount,
                         paidAt = paidAt,
-                        channel = item.optString("channel"),
-                        payerName = item.optString("payer_name"),
-                        payerMessage = item.optString("payer_message"),
+                        channel = item.cleanOptString("channel"),
+                        payerName = item.cleanOptString("payer_name"),
+                        payerMessage = item.cleanOptString("payer_message"),
+                        authorReply = item.cleanOptString("author_reply"),
+                        authorRepliedAt = item.cleanOptString("author_replied_at"),
                     )
                 )
             }
         }
+    }
+
+    private fun JSONObject.cleanOptString(key: String): String {
+        val value = opt(key) ?: return ""
+        if (value == JSONObject.NULL) return ""
+        return value.toString().trim().takeUnless { it.equals("null", ignoreCase = true) }.orEmpty()
     }
 
     fun formatIsoDateTimeForDisplay(

@@ -102,7 +102,9 @@ class SupportRulesTest {
                       "channel": "WECHAT",
                       "payer_name": "小马哥",
                       "payer_contact": "tg:@hidden",
-                      "payer_message": "能否完善支持双sim卡的开关"
+                      "payer_message": "能否完善支持双sim卡的开关",
+                      "author_reply": "会继续优化双 SIM 体验",
+                      "author_replied_at": "2026-06-20T09:00:00.000Z"
                     }
                   ]
                 }
@@ -117,6 +119,40 @@ class SupportRulesTest {
         assertEquals("WECHAT", record.channel)
         assertEquals("小马哥", record.payerName)
         assertEquals("能否完善支持双sim卡的开关", record.payerMessage)
+        assertEquals("会继续优化双 SIM 体验", record.authorReply)
+        assertEquals("2026-06-20T09:00:00.000Z", record.authorRepliedAt)
+    }
+
+    @Test
+    fun dodopayPublicFeedDoesNotExposeNullLikeText() {
+        val records = SupportRules.parseSupportRecords(
+            JSONObject(
+                """
+                {
+                  "items": [
+                    {
+                      "record_id": null,
+                      "amount": "9.90",
+                      "paid_at": "2026-06-19T21:22:50.550Z",
+                      "channel": "null",
+                      "payer_name": null,
+                      "payer_message": "null",
+                      "author_reply": null,
+                      "author_replied_at": "null"
+                    }
+                  ]
+                }
+                """.trimIndent()
+            )
+        )
+
+        val record = records.single()
+        assertEquals("record_0", record.id)
+        assertEquals("", record.channel)
+        assertEquals("", record.payerName)
+        assertEquals("", record.payerMessage)
+        assertEquals("", record.authorReply)
+        assertEquals("", record.authorRepliedAt)
     }
 
     @Test
@@ -131,7 +167,7 @@ class SupportRulesTest {
     }
 
     @Test
-    fun onlyDodopayCheckoutCloseUrlClosesPaymentDialog() {
+    fun onlyDodopayCheckoutCloseUrlIsHandledByPaymentDialog() {
         assertTrue(SupportRules.isDodopayCheckoutCloseUrl("https://pay.dodododo.org/checkout/close?order_id=test"))
         assertTrue(SupportRules.isDodopayCheckoutCloseUrl("https://pay.dodododo.org/checkout/close#payment_proof=proof_${"a".repeat(64)}"))
         assertFalse(SupportRules.isDodopayCheckoutCloseUrl("https://pay.dodododo.org/pay/test"))
@@ -156,6 +192,14 @@ class SupportRulesTest {
         assertNull(SupportRules.extractDodopayPaymentProof("https://pay.dodododo.org/checkout/close#payment_proof=%"))
         assertNull(SupportRules.extractDodopayPaymentProof("https://pay.dodododo.org/checkout/close?payment_proof=%"))
         assertNull(SupportRules.extractDodopayPaymentProof("https://pay.dodododo.org/pay/test#payment_proof=$proof"))
+    }
+
+    @Test
+    fun dodopayCheckoutCloseIsReadyOnlyAfterPaymentProofExists() {
+        val proof = "proof_${"a".repeat(64)}"
+
+        assertFalse(SupportRules.isDodopayCheckoutCloseReady("https://pay.dodododo.org/checkout/close?order_id=ord_1"))
+        assertTrue(SupportRules.isDodopayCheckoutCloseReady("https://pay.dodododo.org/checkout/close#payment_proof=$proof"))
     }
 
     @Test
