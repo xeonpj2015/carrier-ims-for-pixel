@@ -1,6 +1,6 @@
 name: Compilacion Manual Android 17
 on:
-  workflow_dispatch: # Esto nos permite activarlo con un boton a mano
+  workflow_dispatch: # Nos permite activarlo con un boton a mano
 
 jobs:
   build:
@@ -22,6 +22,11 @@ jobs:
       run: chmod +x gradlew
 
     - name: Compilar APK de depuracion
+      env:
+        SIGN_KEY_STORE_FILE: "gradle.properties" # Engañamos a Gradle apuntando a un archivo que sí existe
+        SIGN_KEY_STORE_PASSWORD: "dummy_password"
+        SIGN_KEY_ALIAS: "dummy_alias"
+        SIGN_KEY_PASSWORD: "dummy_password"
       run: ./gradlew assembleDebug
 
     - name: Subir APK generado
