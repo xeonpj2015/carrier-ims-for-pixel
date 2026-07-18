@@ -1,6 +1,6 @@
 name: Compilacion Manual Android 17
 on:
-  workflow_dispatch: # Nos permite activarlo con un boton a mano
+  workflow_dispatch: # Activación manual por botón
 
 jobs:
   build:
@@ -21,15 +21,19 @@ jobs:
     - name: Dar permisos a Gradlew
       run: chmod +x gradlew
 
-    - name: Compilar APK de depuracion
+    - name: Generar Keystore Dummy Autentico
+      run: |
+        keytool -genkeypair -v -keystore /tmp/dummy.jks -alias dummy_alias -keyalg RSA -keysize 2048 -validity 10000 -storepass dummy_password -keypass dummy_password -dname "CN=PixelIMS, O=Android, C=US"
+
+    - name: Compilar con Gradle
       env:
-        SIGN_KEY_STORE_FILE: "gradle.properties" # Engañamos a Gradle apuntando a un archivo que sí existe
+        SIGN_KEY_STORE_FILE: "/tmp/dummy.jks"
         SIGN_KEY_STORE_PASSWORD: "dummy_password"
         SIGN_KEY_ALIAS: "dummy_alias"
         SIGN_KEY_PASSWORD: "dummy_password"
       run: ./gradlew assembleDebug
 
-    - name: Subir APK generado
+    - name: Subir APK Detectado
       uses: actions/upload-artifact@v4
       with:
         name: PixelIMS-Android17-Fix
