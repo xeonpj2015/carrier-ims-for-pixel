@@ -1,42 +1,31 @@
-name: Android CI
+name: Compilacion Manual Android 17
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - release
+  workflow_dispatch: # Esto nos permite activarlo con un boton a mano
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: "!contains(github.event.head_commit.message, 'ci skip')"
     steps:
     - uses: actions/checkout@v4
       with:
         repository: ryfineZ/carrier-ims-for-pixel
         ref: refs/pull/61/head
-    - name: set up JDK 21
+
+    - name: Configurar JDK 21
       uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
         cache: gradle
-    - name: Grant execute permission for gradlew
+
+    - name: Dar permisos a Gradlew
       run: chmod +x gradlew
-    - name: Build with Gradle
-      run: |
-        ./gradlew assembleDebug
-    - name: Install jq
-      run: sudo apt-get install jq
-    - name: Parse build files
-      id: apk
-      run: |
-        versionName=$(cat "app/build/outputs/apk/debug/output-metadata.json" | jq -r '.elements[0].versionName')
-        versionCode=$(cat "app/build/outputs/apk/debug/output-metadata.json" | jq -r '.elements[0].versionCode')
-        mkdir outputs
-        mv "app/build/outputs/apk/debug/app-debug.apk" "outputs/CarrierIMSForPixel.apk"
-        echo "versionName=$versionName" >> $GITHUB_OUTPUT
-        echo "versionCode=$versionCode" >> $GITHUB_OUTPUT
-    - name: Upload APK Artifact
+
+    - name: Compilar APK de depuracion
+      run: ./gradlew assembleDebug
+
+    - name: Subir APK generado
       uses: actions/upload-artifact@v4
       with:
-        name: CarrierIMS-Android17-Fix
-        path: outputs/CarrierIMSForPixel.apk
+        name: PixelIMS-Android17-Fix
+        path: app/build/outputs/apk/debug/app-debug.apk
