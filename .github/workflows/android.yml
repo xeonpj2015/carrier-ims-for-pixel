@@ -73,10 +73,14 @@ jobs:
         SIGN_KEY_PASSWORD: "dummy_password"
       run: ./gradlew assembleRelease
 
+    - name: Renombrar APK con nombre oficial de la app
+      run: |
+        mv app/build/outputs/apk/release/app-release.apk app/build/outputs/apk/release/Unlocker-VoLTE-VoWifi-v1.0.apk
+
     - name: Publicar APK en la sección de Releases
       uses: softprops/action-gh-release@v2
       with:
-        files: app/build/outputs/apk/release/app-release.apk
+        files: app/build/outputs/apk/release/Unlocker-VoLTE-VoWifi-v1.0.apk
         tag_name: v1.17-es
         name: "Unlocker VoLTE + VoWifi (Android 17)"
         body: |
