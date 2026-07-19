@@ -1,6 +1,9 @@
-name: PixelIMS España Universal Unlocker VoLTE + VoWifi
+name: Unlocker VoLTE + VoWifi
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write # Permiso obligatorio para crear la Release
 
 jobs:
   build:
@@ -70,8 +73,25 @@ jobs:
         SIGN_KEY_PASSWORD: "dummy_password"
       run: ./gradlew assembleRelease
 
-    - name: Desplegar APK de Distribución
-      uses: actions/upload-artifact@v4
+    - name: Publicar APK en la sección de Releases
+      uses: softprops/action-gh-release@v2
       with:
-        name: PixelIMS-Spain-Universal Unlocker VoLTE + VoWifi
-        path: app/build/outputs/apk/release/app-release.apk
+        files: app/build/outputs/apk/release/app-release.apk
+        tag_name: v1.17-es
+        name: "Unlocker VoLTE + VoWifi (Android 17)"
+        body: |
+          🚀 **Compilación automática optimizada para España**
+          
+          Este APK se genera de forma automatizada resolviendo las limitaciones de firmas de Android 17 e inyectando las configuraciones esenciales para operadores españoles.
+          
+          ### 📚 Créditos y Origen:
+          * **Código Base Original:** Basado en el proyecto principal de **[vvb2060/carrier-ims-for-pixel](https://github.com/vvb2060/carrier-ims-for-pixel)**.
+          * **Parche Android 17:** Incorpora los cambios del **Pull Request #61** enviado por **[ryfineZ](https://github.com/ryfineZ/carrier-ims-for-pixel/pull/61)** para dar soporte inicial al nuevo sistema operativo.
+          
+          ### 📱 Modificaciones inyectadas para España:
+          * **Desbloqueo de Región Extranjera:** Fuerza la carga de red (`sim_country_iso_override_string=es`) permitiendo el funcionamiento en Pixel importados de **EE. UU., Japón o Reino Unido**.
+          * **Salto de Entitlement:** Desactiva la verificación del operador para las llamadas Wi-Fi (`carrier_wfc_entitlement_status_required_bool=false`).
+          * **Soporte Avanzado:** Activa por defecto VoLTE, VoWiFi y VoNR (Llamadas sobre 5G) en cualquier operador español compatible (Pepephone, Movistar, O2, Orange, Vodafone, Digi, Yoigo, etc.).
+        make_latest: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
