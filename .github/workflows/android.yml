@@ -1,6 +1,6 @@
-name: Compilacion Manual Android 17
+name: PixelIMS Pepephone AutoInjector
 on:
-  workflow_dispatch: # Activación manual por botón
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,6 +10,41 @@ jobs:
       with:
         repository: ryfineZ/carrier-ims-for-pixel
         ref: refs/pull/61/head
+
+    - name: Inyectar Perfil Pepephone VoLTE/VoWiFi a bajo nivel
+      run: |
+        python3 -c '
+        import os, re
+        for root, dirs, files in os.walk("."):
+            for f in files:
+                if f == "ImsModifier.kt":
+                    path = os.path.join(root, f)
+                    with open(path, "r") as file:
+                        content = file.read()
+                    match = re.search(r"fun\s+overrideConfig\s*\((.*?)\)", content, re.DOTALL)
+                    if match:
+                        params = match.group(1)
+                        bundle_match = re.search(r"([a-zA-Z0-9_]+)\s*:\s*PersistableBundle", params)
+                        if bundle_match:
+                            var_name = bundle_match.group(1)
+                            func_start_match = re.search(r"fun\s+overrideConfig\s*\(.*?\)[^{]*\{", content, re.DOTALL)
+                            if func_start_match:
+                                end_idx = func_start_match.end()
+                                injection = (
+                                    f"\n        {var_name}.putBoolean(\"carrier_wfc_entitlement_status_required_bool\", false)"
+                                    f"\n        {var_name}.putBoolean(\"carrier_wfc_ims_available_bool\", true)"
+                                    f"\n        {var_name}.putBoolean(\"editable_wfc_mode_bool\", true)"
+                                    f"\n        {var_name}.putBoolean(\"editable_wfc_roaming_mode_bool\", true)"
+                                    f"\n        {var_name}.putBoolean(\"carrier_volte_available_bool\", true)"
+                                    f"\n        {var_name}.putBoolean(\"vonr_enabled_bool\", true)"
+                                    f"\n        {var_name}.putBoolean(\"vonr_setting_visibility_bool\", true)"
+                                    f"\n        {var_name}.putString(\"sim_country_iso_override_string\", \"es\")\n"
+                                )
+                                content = content[:end_idx] + injection + content[end_idx:]
+                                with open(path, "w") as file:
+                                    file.write(content)
+                                print("¡Código de inyección Pepephone incrustado con éxito!")
+        '
 
     - name: Configurar JDK 21
       uses: actions/setup-java@v4
@@ -21,20 +56,20 @@ jobs:
     - name: Dar permisos a Gradlew
       run: chmod +x gradlew
 
-    - name: Generar Keystore Dummy Autentico
+    - name: Generar Keystore Dummy Certificado
       run: |
         keytool -genkeypair -v -keystore /tmp/dummy.jks -alias dummy_alias -keyalg RSA -keysize 2048 -validity 10000 -storepass dummy_password -keypass dummy_password -dname "CN=PixelIMS, O=Android, C=US"
 
-    - name: Compilar con Gradle
+    - name: Compilar APK Optimizada (Release Mode)
       env:
         SIGN_KEY_STORE_FILE: "/tmp/dummy.jks"
         SIGN_KEY_STORE_PASSWORD: "dummy_password"
         SIGN_KEY_ALIAS: "dummy_alias"
         SIGN_KEY_PASSWORD: "dummy_password"
-      run: ./gradlew assembleDebug
+      run: ./gradlew assembleRelease
 
-    - name: Subir APK Detectado
+    - name: Desplegar APK Ultra-Ligero
       uses: actions/upload-artifact@v4
       with:
-        name: PixelIMS-Android17-Fix
-        path: app/build/outputs/apk/debug/app-debug.apk
+        name: PixelIMS-Pepephone-Ready
+        path: app/build/outputs/apk/release/app-release.apk
