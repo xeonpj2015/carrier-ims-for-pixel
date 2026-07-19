@@ -28,5 +28,6 @@ El flujo de este repositorio modifica el código fuente antes de compilar para p
 1. Dirígete a la sección **Releases** en la barra lateral derecha de este repositorio.
 2. Descarga el archivo ejecutable **`app-release.apk`**.
 3. Asegúrate de tener **Shizuku** configurado y ejecutándose en tu Pixel.
-4. Instala el APK, concédele acceso a Shizuku, abre la app y pulsa el botón principal para registrar la configuración.
-5. Activa el **Modo Avión** durante 15 segundos y desactívalo para reiniciar el módem de red.
+4. > ⚠️ **Nota sobre Google Play Protect:** Al instalar el archivo `.apk`, es completamente normal que Android muestre un aviso de "Aplicación bloqueada" o "Desarrollador desconocido". Esto ocurre porque el instalador se compila y se firma automáticamente en los servidores de GitHub con un certificado genérico independiente (no está publicado en la tienda oficial de Google). El código es 100% limpio y transparente. Para poder instalarlo, simplemente pulsa en **"Más detalles"** y luego en **"Instalar de todos modos"**.
+5. Instala el APK, concédele acceso a Shizuku, abre la app y pulsa el botón principal para registrar la configuración.
+6. Activa el **Modo Avión** durante 15 segundos y desactívalo para reiniciar el módem de red.
